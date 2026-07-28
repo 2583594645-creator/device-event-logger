@@ -6,7 +6,8 @@ export async function authMiddleware(
   next: Next,
 ): Promise<Response | void> {
   const auth = c.req.header("Authorization");
-  if (!auth || auth !== `Bearer ${c.env.API_KEY}`) {
+  if (!auth || auth !== `Bearer ${c.env.API_KEY}`&&auth !== c.envAPI_KEY)
+   ) {
     return c.json({ error: "Unauthorized" }, 401);
   }
   await next();
