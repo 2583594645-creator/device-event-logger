@@ -2,21 +2,55 @@ import { Hono } from "hono";
 import type { Env, Vars } from "./types.ts";
 import { corsMiddleware } from "./middleware/cors.ts";
 import { authMiddleware } from "./middleware/auth.ts";
-import { createSql } from "./lib/db.ts";
+import { createSql, withRetry } from "./lib/db.ts";
 import { parseOffsetEnv } from "./lib/timezone.ts";
 import { events } from "./routes/events.ts";
 import { mcp } from "./routes/mcp.ts";
 import type postgres from "postgres";
 
+const SCHEMA_DDL = `
+  CREATE TABLE IF NOT EXISTS events (
+    id SERIAL PRIMARY KEY,
+    type TEXT NOT NULL CHECK (type ~ '^[a-z0-9]+(\\.[a-z0-9]+)*$'),
+    value TEXT,
+    ts TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(type, ts);
+  CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
+`;
+
 export type AppOptions = {
   postgresOptions?: Record<string, unknown>;
+  /** 替换数据库连接的创建方式，测试用 */
+  createSql?: (databaseUrl: string, options?: Record<string, unknown>) => postgres.Sql;
 };
 
 export function createApp(options?: AppOptions) {
   const app = new Hono<{ Bindings: Env; Variables: Vars }>();
+  const makeSql = options?.createSql ?? createSql;
 
   let sqlInstance: postgres.Sql | null = null;
+  let schemaReady = false;
+  let schemaPromise: Promise<void> | null = null;
   let cachedOffsetMinutes: number | null = null;
+
+  /**
+   * 建表。并发请求共用同一次执行；失败时清掉进行中的 Promise，
+   * 让下一个请求重新尝试——数据库晚一步就绪不应该让这个部署永久缺表。
+   */
+  async function ensureSchema(sql: postgres.Sql): Promise<void> {
+    if (schemaReady) return;
+    schemaPromise ??= withRetry(() => sql.unsafe(SCHEMA_DDL)).then(() => {
+      schemaReady = true;
+    });
+    try {
+      await schemaPromise;
+    } catch (error) {
+      schemaPromise = null;
+      throw error;
+    }
+  }
 
   // CORS
   app.use("*", corsMiddleware);
@@ -36,19 +70,9 @@ export function createApp(options?: AppOptions) {
   app.use("*", async (c, next) => {
     if (!sqlInstance) {
       const databaseUrl = c.env.DATABASE_URL ?? "";
-      sqlInstance = createSql(databaseUrl, options?.postgresOptions);
-      await sqlInstance.unsafe(`
-        CREATE TABLE IF NOT EXISTS events (
-          id SERIAL PRIMARY KEY,
-          type TEXT NOT NULL CHECK (type ~ '^[a-z0-9]+(\\.[a-z0-9]+)*$'),
-          value TEXT,
-          ts TIMESTAMPTZ NOT NULL,
-          created_at TIMESTAMPTZ DEFAULT now()
-        );
-        CREATE INDEX IF NOT EXISTS idx_events_type_ts ON events(type, ts);
-        CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
-      `);
+      sqlInstance = makeSql(databaseUrl, options?.postgresOptions);
     }
+    await ensureSchema(sqlInstance);
     if (cachedOffsetMinutes === null) {
       cachedOffsetMinutes = parseOffsetEnv(c.env.TZ_OFFSET);
     }
