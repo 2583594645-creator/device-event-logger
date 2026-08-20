@@ -1,9 +1,22 @@
+/** 默认 +08:00 */
+export const DEFAULT_OFFSET_MINUTES = 480;
+
+// 现实中的时区范围：UTC-12:00 到 UTC+14:00
+const MIN_OFFSET_MINUTES = -720;
+const MAX_OFFSET_MINUTES = 840;
+
+/**
+ * TZ_OFFSET 的单位是分钟，这样 +05:30、+05:45 这类非整点时区也能直接写（330、345）。
+ * 空值、非数字、超出真实时区范围的都回落到默认值。
+ */
 export function parseOffsetEnv(raw?: string): number {
-  if (raw == null || raw.trim() === "") return 480;
-  const hours = Number(raw);
-  if (!Number.isFinite(hours)) return 480;
-  const minutes = Math.round(hours * 60);
-  if (minutes < -720 || minutes > 840) return 480;
+  if (raw == null || raw.trim() === "") return DEFAULT_OFFSET_MINUTES;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_OFFSET_MINUTES;
+  const minutes = Math.round(parsed);
+  if (minutes < MIN_OFFSET_MINUTES || minutes > MAX_OFFSET_MINUTES) {
+    return DEFAULT_OFFSET_MINUTES;
+  }
   return minutes;
 }
 
