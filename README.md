@@ -79,6 +79,6 @@ npm start
 | 变量 | 说明 | 必填 |
 |------|------|------|
 | `DATABASE_URL` | PostgreSQL 连接字符串 | 是 |
-| `API_KEY` | `/events` 端点的认证密钥 | 是 |
+| `API_KEY` | `/events` 端点的认证密钥（`Authorization` 头写 `Bearer <key>` 或直接写 `<key>` 都可以） | 是 |
 | `TZ_OFFSET` | 与 UTC 的时区偏移（分钟，默认 `480`，即 +08:00；+05:30 这类非整点时区写 `330`） | 否 |
 | `PORT` | 服务端口（默认 `8000`，仅 Node/Deno） | 否 |
