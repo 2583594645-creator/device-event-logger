@@ -41,3 +41,34 @@ export function formatWithOffset(input: unknown, offsetMinutes: number): string 
 
   return `${year}-${month}-${day}T${hour}:${minute}:${second}.${millisecond}${sign}${hh}:${mm}`;
 }
+
+/**
+ * 把「本地某一天」换算成 UTC 时间区间，端点为 [start, end)。
+ * 日期按 TZ_OFFSET 指定的时区解释，所以 TZ_OFFSET=480 时
+ * 2026-08-20 指的是 2026-08-20T00:00+08:00 到 2026-08-21T00:00+08:00。
+ * 格式不对或日期不存在（如 2026-02-30）返回 null。
+ */
+export function localDayRange(
+  date: string,
+  offsetMinutes: number,
+): { start: Date; end: Date } | null {
+  const matched = /^(\d{4})-(\d{2})-(\d{2})$/.exec(date.trim());
+  if (!matched) return null;
+
+  const year = Number(matched[1]);
+  const month = Number(matched[2]);
+  const day = Number(matched[3]);
+
+  const localMidnight = Date.UTC(year, month - 1, day);
+  const roundTrip = new Date(localMidnight);
+  if (
+    roundTrip.getUTCFullYear() !== year ||
+    roundTrip.getUTCMonth() !== month - 1 ||
+    roundTrip.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  const start = new Date(localMidnight - offsetMinutes * 60_000);
+  return { start, end: new Date(start.getTime() + 86400_000) };
+}

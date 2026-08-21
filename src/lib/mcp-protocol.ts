@@ -1,7 +1,15 @@
 import type { Context } from "hono";
 import type postgres from "postgres";
 import type { Env, Vars, JsonRpcId, JsonRpcMessage } from "../types.ts";
-import { queryEvents, parseEventQueryFromToolArgs, buildEventSummaryText } from "./queries.ts";
+import {
+  buildEventSummaryText,
+  countMatchingEvents,
+  deleteEvents,
+  describeDeleteFilter,
+  parseDeleteFilter,
+  parseEventQueryFromToolArgs,
+  queryEvents,
+} from "./queries.ts";
 import { withRetry } from "./db.ts";
 
 const DEFAULT_MCP_PROTOCOL_VERSION = "2025-03-26";
@@ -18,8 +26,8 @@ const SUPPORTED_MCP_PROTOCOL_VERSIONS = new Set(SUPPORTED_MCP_PROTOCOL_VERSION_L
 const MCP_SERVER_INFO = {
   name: "device-event-logger",
   title: "User Device Event Logger",
-  version: "1.0.0",
-  description: "Query user device event records from a database. Read-only.",
+  version: "1.1.0",
+  description: "Query and prune user device event records stored in a database.",
 };
 
 const QUERY_EVENTS_TOOL = {
@@ -127,6 +135,66 @@ const LIST_EVENT_TYPES_TOOL = {
   },
 };
 
+const DELETE_EVENTS_TOOL = {
+  name: "delete_events",
+  title: "Delete Events",
+  description:
+    "Permanently delete event records matching a time range, an event type and/or a value. " +
+    "Destructive and irreversible. Runs as a preview by default: without confirm=true it only reports " +
+    "how many records would be deleted. At least one filter is required.",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      before_days: {
+        type: "number",
+        description:
+          "Delete records older than N days, counted from now. Cannot be combined with 'date' or 'until'.",
+        minimum: 0.001,
+      },
+      date: {
+        type: "string",
+        description:
+          "Delete one local calendar day, written as YYYY-MM-DD and read in the server's configured timezone. Cannot be combined with 'before_days', 'since' or 'until'.",
+      },
+      since: {
+        type: "string",
+        description: "Start of the range to delete, ISO 8601. Inclusive.",
+      },
+      until: {
+        type: "string",
+        description: "End of the range to delete, ISO 8601. Inclusive.",
+      },
+      type: {
+        type: "string",
+        description:
+          "Event type filter (dot-separated lowercase alphanumeric). A type without a dot also matches its children, so 'app' covers 'app.open' and every other 'app.*'; 'app.open' matches that one type only. Use list_event_types to discover available types.",
+      },
+      value: {
+        type: "string",
+        description: "Exact value filter, e.g. one specific app name.",
+      },
+      confirm: {
+        type: "boolean",
+        description:
+          "Must be true to actually delete. Omit it (or pass false) to preview how many records match first.",
+      },
+    },
+    required: [],
+  },
+  outputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      confirmed: { type: "boolean" },
+      matched: { type: "integer" },
+      deleted: { type: "integer" },
+      filter: { type: "string" },
+    },
+    required: ["confirmed", "matched", "deleted", "filter"],
+  },
+};
+
 function jsonRpcError(id: JsonRpcId, code: number, message: string, data?: unknown) {
   return {
     jsonrpc: "2.0" as const,
@@ -213,6 +281,49 @@ async function callListEventTypesTool(args: Record<string, unknown>, sql: postgr
   }
 }
 
+async function callDeleteEventsTool(
+  args: Record<string, unknown>,
+  sql: postgres.Sql,
+  offsetMinutes: number,
+) {
+  const filter = parseDeleteFilter(args, offsetMinutes);
+  if (typeof filter === "string") {
+    return { content: [{ type: "text", text: filter }], isError: true };
+  }
+
+  const description = describeDeleteFilter(filter, offsetMinutes);
+  const confirmed = args.confirm === true || args.confirm === "true";
+
+  try {
+    if (!confirmed) {
+      const matched = await countMatchingEvents(filter, sql);
+      return {
+        content: [{
+          type: "text",
+          text:
+            `Preview only, nothing was deleted. ${matched} event(s) match ${description}. ` +
+            `Call delete_events again with the same filters plus confirm=true to delete them.`,
+        }],
+        structuredContent: { confirmed: false, matched, deleted: 0, filter: description },
+        isError: false,
+      };
+    }
+
+    const deleted = await deleteEvents(filter, sql);
+    return {
+      content: [{ type: "text", text: `Deleted ${deleted} event(s) matching ${description}.` }],
+      structuredContent: { confirmed: true, matched: deleted, deleted, filter: description },
+      isError: false,
+    };
+  } catch (error) {
+    console.error("MCP delete_events failed:", error);
+    return {
+      content: [{ type: "text", text: "Database error while deleting events." }],
+      isError: true,
+    };
+  }
+}
+
 async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offsetMinutes: number) {
   const id = (message.id ?? null) as JsonRpcId;
   const method = typeof message.method === "string" ? message.method : "";
@@ -235,7 +346,8 @@ async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offs
         capabilities: { tools: { listChanged: false } },
         serverInfo: MCP_SERVER_INFO,
         instructions:
-          "This server provides read-only access to user device event records. Use list_event_types to discover available event types, then use query_events to query records by time range, type, and value.",
+          "This server exposes user device event records. Use list_event_types to discover available event types, then use query_events to read records by time range, type, and value. " +
+          "delete_events removes records permanently: always run it once without confirm to preview the match count, show that count to the user, and only re-run it with confirm=true after they agree.",
       });
     }
     case "notifications/initialized":
@@ -244,7 +356,7 @@ async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offs
       return jsonRpcResult(id, {});
     case "tools/list":
       return jsonRpcResult(id, {
-        tools: [QUERY_EVENTS_TOOL, LIST_EVENT_TYPES_TOOL],
+        tools: [QUERY_EVENTS_TOOL, LIST_EVENT_TYPES_TOOL, DELETE_EVENTS_TOOL],
       });
     case "tools/call": {
       const name = typeof params.name === "string" ? params.name : "";
@@ -253,6 +365,9 @@ async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offs
         : {};
       if (name === LIST_EVENT_TYPES_TOOL.name) {
         return jsonRpcResult(id, await callListEventTypesTool(args, sql));
+      }
+      if (name === DELETE_EVENTS_TOOL.name) {
+        return jsonRpcResult(id, await callDeleteEventsTool(args, sql, offsetMinutes));
       }
       if (name !== QUERY_EVENTS_TOOL.name) {
         return jsonRpcError(id, -32601, `Unknown tool: ${name || "(empty)"}`);

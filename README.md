@@ -1,6 +1,6 @@
 # device-event-logger
 
-记录用户设备事件的 API 端点，支持通过 MCP 查询。
+记录用户设备事件的 API 端点，支持通过 MCP 查询和清理。
 
 ## 一键部署
 
@@ -82,3 +82,49 @@ npm start
 | `API_KEY` | `/events` 端点的认证密钥（`Authorization` 头写 `Bearer <key>` 或直接写 `<key>` 都可以） | 是 |
 | `TZ_OFFSET` | 与 UTC 的时区偏移（分钟，默认 `480`，即 +08:00；+05:30 这类非整点时区写 `330`） | 否 |
 | `PORT` | 服务端口（默认 `8000`，仅 Node/Deno） | 否 |
+
+## MCP 工具
+
+`/mcp` 是一个 JSON-RPC 端点，接入 MCP 客户端后有三个工具可用。
+
+| 工具 | 作用 |
+|------|------|
+| `list_event_types` | 列出库里出现过的事件类型，可用 `hours` 限定最近多久 |
+| `query_events` | 按时间范围、类型、值查询记录 |
+| `delete_events` | 按时间范围、类型、值删除记录 |
+
+### delete_events
+
+删除条件可以任意组合，至少要给一个：
+
+| 参数 | 说明 |
+|------|------|
+| `before_days` | 删 N 天前的记录（从当前时刻往回算） |
+| `date` | 删本地某一天，写 `YYYY-MM-DD`，按 `TZ_OFFSET` 所在时区解释 |
+| `since` / `until` | 自定义时间区间，ISO 8601，两端都含 |
+| `type` | 事件类型。不带点号时连子类型一起匹配（`app` 覆盖 `app.open` 等所有 `app.*`），带点号只匹配这一种 |
+| `value` | 精确匹配值，比如某个具体应用名 |
+| `confirm` | 传 `true` 才真的删 |
+
+时间条件三选一：`date` 不能和 `before_days`、`since`、`until` 一起用；`before_days` 和 `until` 都定义时间上界，也不能同时给。
+
+不带 `confirm` 时是预览模式，只返回命中条数，不动数据：
+
+```json
+{ "before_days": 30, "type": "app" }
+→ Preview only, nothing was deleted. 128 event(s) match ...
+```
+
+确认条数没问题后，同样的条件加上 `confirm: true` 再调一次才会真删。
+
+> `/mcp` 端点不校验 API_KEY，拿到 URL 的人就能调用包括 `delete_events` 在内的所有工具。部署时注意别把地址公开出去。
+
+## HTTP 端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/events` | 写入一条事件，body 为 `{ "type": "app.open", "value": "Safari" }` |
+| `GET` | `/events` | 查询记录，支持 `hours`/`since`/`until`/`type`/`value`/`limit`/`offset` |
+| `DELETE` | `/events?days=N` | 删除 N 天前的记录 |
+
+`/events` 需要在 `Authorization` 头里带上 API_KEY，写 `Bearer <key>` 或直接写 `<key>` 都可以。

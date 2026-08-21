@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env, Vars } from "../types.ts";
-import { parseEventQueryFromUrl, queryEvents } from "../lib/queries.ts";
+import { deleteEvents, parseDeleteFilter, parseEventQueryFromUrl, queryEvents } from "../lib/queries.ts";
 import { withRetry } from "../lib/db.ts";
 
 const events = new Hono<{ Bindings: Env; Variables: Vars }>();
@@ -67,13 +67,14 @@ events.delete("/", async (c) => {
     return c.json({ error: "'days' must be an integer >= 1" }, 400);
   }
 
-  const cutoff = new Date(Date.now() - days * 86400_000);
+  // 和 MCP 的 delete_events 走同一套条件拼装，避免两条删除路径各写一套 SQL 后跑偏
+  const filter = parseDeleteFilter({ before_days: days }, c.var.offsetMinutes);
+  if (typeof filter === "string") {
+    return c.json({ error: filter }, 400);
+  }
 
   try {
-    const result = await withRetry(() =>
-      sql`DELETE FROM events WHERE ts < ${cutoff.toISOString()}`
-    );
-    return c.json({ ok: true, deleted: (result as { count: number }).count });
+    return c.json({ ok: true, deleted: await deleteEvents(filter, sql) });
   } catch (e) {
     console.error("DB error:", e);
     return c.json({ error: "Database error" }, 500);

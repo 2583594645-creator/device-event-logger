@@ -1,7 +1,10 @@
 import type postgres from "postgres";
-import type { EventQuery, EventRecord } from "../types.ts";
-import { formatWithOffset } from "./timezone.ts";
+import type { DeleteFilter, EventQuery, EventRecord } from "../types.ts";
+import { formatWithOffset, localDayRange } from "./timezone.ts";
 import { withRetry } from "./db.ts";
+
+/** 与建表时 CHECK 约束一致的事件类型格式 */
+const TYPE_PATTERN = /^[a-z0-9]+(\.[a-z0-9]+)*$/;
 
 export function parseEventQueryFromUrl(url: URL): EventQuery | { error: string } {
   const result = parseEventQuery({
@@ -77,39 +80,63 @@ export function parseEventQuery(
   return { since, until, type, value, limit, offset };
 }
 
+type EventFilter = {
+  since?: Date;
+  until?: Date;
+  untilExclusive?: boolean;
+  type?: string;
+  value?: string;
+};
+
+/**
+ * 拼 WHERE 子句。查询和删除共用，省得两边的类型前缀匹配规则各写一套后跑偏。
+ * 没有任何条件时 where 是空串，调用方自己决定这算不算合法。
+ */
+function buildEventConditions(
+  filter: EventFilter,
+): { where: string; values: (string | number)[]; nextIndex: number } {
+  const conditions: string[] = [];
+  const values: (string | number)[] = [];
+  let paramIndex = 1;
+
+  if (filter.since) {
+    conditions.push(`ts >= $${paramIndex++}`);
+    values.push(filter.since.toISOString());
+  }
+  if (filter.until) {
+    conditions.push(`ts ${filter.untilExclusive ? "<" : "<="} $${paramIndex++}`);
+    values.push(filter.until.toISOString());
+  }
+
+  if (filter.type) {
+    if (filter.type.includes(".")) {
+      conditions.push(`type = $${paramIndex++}`);
+      values.push(filter.type);
+    } else {
+      conditions.push(`(type = $${paramIndex} OR type LIKE $${paramIndex + 1})`);
+      values.push(filter.type, `${filter.type}.%`);
+      paramIndex += 2;
+    }
+  }
+
+  if (filter.value) {
+    conditions.push(`value = $${paramIndex++}`);
+    values.push(filter.value);
+  }
+
+  return { where: conditions.join(" AND "), values, nextIndex: paramIndex };
+}
+
 export async function queryEvents(
   query: EventQuery,
   sql: postgres.Sql,
   offsetMinutes: number,
 ): Promise<{ events: EventRecord[]; total: number }> {
-  const conditions: string[] = [];
-  const values: (string | number)[] = [];
-  let paramIndex = 1;
-
-  conditions.push(`ts >= $${paramIndex++}`);
-  values.push(query.since.toISOString());
-  conditions.push(`ts <= $${paramIndex++}`);
-  values.push(query.until.toISOString());
-
-  if (query.type) {
-    if (query.type.includes(".")) {
-      conditions.push(`type = $${paramIndex++}`);
-      values.push(query.type);
-    } else {
-      conditions.push(`(type = $${paramIndex} OR type LIKE $${paramIndex + 1})`);
-      values.push(query.type, `${query.type}.%`);
-      paramIndex += 2;
-    }
-  }
-
-  if (query.value) {
-    conditions.push(`value = $${paramIndex++}`);
-    values.push(query.value);
-  }
-
-  const where = conditions.join(" AND ");
-  const limitIdx = paramIndex++;
-  const offsetIdx = paramIndex++;
+  const built = buildEventConditions(query);
+  const where = built.where;
+  const values = built.values;
+  const limitIdx = built.nextIndex;
+  const offsetIdx = built.nextIndex + 1;
   values.push(query.limit, query.offset);
 
   const [countResult, rows] = await withRetry(async () => {
@@ -152,4 +179,123 @@ export function buildEventSummaryText(events: EventRecord[], total: number): str
     `Found ${events.length} event(s). Total matches: ${total}.`,
     ...lines,
   ].join("\n");
+}
+
+/**
+ * 解析删除条件。时间有三种写法，互斥：
+ * - `before_days`：删 N 天前的记录
+ * - `date`：删本地某一天（按 TZ_OFFSET 解释）
+ * - `since` / `until`：自定义区间
+ *
+ * 至少要给一个条件（时间、类型或值），一个都不给直接报错，
+ * 免得「一句话清空整张表」。出错时返回错误信息字符串。
+ */
+export function parseDeleteFilter(
+  input: Record<string, unknown>,
+  offsetMinutes: number,
+): DeleteFilter | string {
+  const text = (key: string): string | undefined => {
+    const raw = input[key];
+    if (raw == null) return undefined;
+    const trimmed = String(raw).trim();
+    return trimmed === "" ? undefined : trimmed;
+  };
+
+  const rawBeforeDays = text("before_days");
+  const rawDate = text("date");
+  const rawSince = text("since");
+  const rawUntil = text("until");
+  const rawType = text("type");
+  const value = input.value == null || String(input.value).trim() === ""
+    ? undefined
+    : String(input.value);
+
+  if (rawDate && (rawBeforeDays || rawSince || rawUntil)) {
+    return "'date' cannot be combined with 'before_days', 'since' or 'until'";
+  }
+  if (rawBeforeDays && rawUntil) {
+    return "'before_days' cannot be combined with 'until': both set the upper time bound";
+  }
+
+  let since: Date | undefined;
+  let until: Date | undefined;
+  let untilExclusive = false;
+
+  if (rawDate) {
+    const range = localDayRange(rawDate, offsetMinutes);
+    if (!range) return "Invalid 'date': expected an existing calendar day as YYYY-MM-DD";
+    since = range.start;
+    until = range.end;
+    untilExclusive = true;
+  }
+
+  if (rawBeforeDays) {
+    const days = Number(rawBeforeDays);
+    if (!Number.isFinite(days) || days <= 0) return "'before_days' must be a number greater than 0";
+    until = new Date(Date.now() - days * 86400_000);
+    untilExclusive = true;
+  }
+
+  if (rawSince) {
+    since = new Date(rawSince);
+    if (Number.isNaN(since.getTime())) return "Invalid 'since' format";
+  }
+  if (rawUntil) {
+    until = new Date(rawUntil);
+    if (Number.isNaN(until.getTime())) return "Invalid 'until' format";
+  }
+
+  if (since && until && until.getTime() < since.getTime()) {
+    return "'until' must be greater than or equal to 'since'";
+  }
+
+  let type: string | undefined;
+  if (rawType) {
+    // 类型会被拼进 LIKE 模式，含 % 或 _ 的字符串会悄悄扩大删除范围，直接挡掉
+    if (!TYPE_PATTERN.test(rawType)) {
+      return "Invalid 'type' format: use dot-separated lowercase alphanumeric (e.g. 'app' or 'app.open')";
+    }
+    type = rawType;
+  }
+
+  if (!since && !until && !type && value === undefined) {
+    return "Provide at least one filter: 'before_days', 'date', 'since', 'until', 'type' or 'value'";
+  }
+
+  return { since, until, untilExclusive, type, value };
+}
+
+/** 把删除条件写成人能读的一行，用在预览和结果文案里 */
+export function describeDeleteFilter(filter: DeleteFilter, offsetMinutes: number): string {
+  const parts: string[] = [];
+  if (filter.since) parts.push(`since=${formatWithOffset(filter.since, offsetMinutes)}`);
+  if (filter.until) {
+    const bound = filter.untilExclusive ? "until(exclusive)" : "until";
+    parts.push(`${bound}=${formatWithOffset(filter.until, offsetMinutes)}`);
+  }
+  if (filter.type) {
+    parts.push(filter.type.includes(".") ? `type=${filter.type}` : `type=${filter.type}(+${filter.type}.*)`);
+  }
+  if (filter.value) parts.push(`value=${filter.value}`);
+  return parts.join(", ");
+}
+
+/** 预览：只数命中多少条，不动数据 */
+export async function countMatchingEvents(filter: DeleteFilter, sql: postgres.Sql): Promise<number> {
+  const { where, values } = buildEventConditions(filter);
+  if (!where) throw new Error("Refusing to count events without any filter");
+
+  const rows = await withRetry(() =>
+    sql.unsafe(`SELECT COUNT(*)::int AS total FROM events WHERE ${where}`, values)
+  );
+  return Number((rows[0] as Record<string, unknown> | undefined)?.total ?? 0);
+}
+
+/** 真删。空条件在这里再拦一道，任何调用方都别想绕过去清空整张表 */
+export async function deleteEvents(filter: DeleteFilter, sql: postgres.Sql): Promise<number> {
+  const { where, values } = buildEventConditions(filter);
+  if (!where) throw new Error("Refusing to delete events without any filter");
+
+  const result = await withRetry(() => sql.unsafe(`DELETE FROM events WHERE ${where}`, values));
+  return Number((result as unknown as { count?: number }).count ?? 0);
 }

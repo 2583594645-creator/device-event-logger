@@ -29,3 +29,12 @@ export type EventQuery = {
 
 export type JsonRpcId = string | number | null;
 export type JsonRpcMessage = Record<string, unknown>;
+
+export type DeleteFilter = {
+  since?: Date;
+  until?: Date;
+  /** true 时上界用 `ts < until`，用于「某一天」「N 天前」这类半开区间 */
+  untilExclusive: boolean;
+  type?: string;
+  value?: string;
+};
