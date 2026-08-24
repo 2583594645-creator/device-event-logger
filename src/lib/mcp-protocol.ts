@@ -54,7 +54,7 @@ const QUERY_EVENTS_TOOL = {
       type: {
         type: "string",
         description:
-          "Event type filter (dot-separated lowercase alphanumeric, e.g. 'app.open'). Prefix match when no dot is present; exact match otherwise. Use the list_event_types tool to discover available types.",
+          "Event type filter (dot-separated lowercase alphanumeric, e.g. 'app.open'). Prefix match when no dot is present; exact match otherwise. Use the list_event_types tool to discover availabl[...]
       },
       value: {
         type: "string",
@@ -168,7 +168,7 @@ const DELETE_EVENTS_TOOL = {
       type: {
         type: "string",
         description:
-          "Event type filter (dot-separated lowercase alphanumeric). A type without a dot also matches its children, so 'app' covers 'app.open' and every other 'app.*'; 'app.open' matches that one type only. Use list_event_types to discover available types.",
+          "Event type filter (dot-separated lowercase alphanumeric). A type without a dot also matches its children, so 'app' covers 'app.open' and every other 'app.*'; 'app.open' matches that on[...]
       },
       value: {
         type: "string",
@@ -192,6 +192,36 @@ const DELETE_EVENTS_TOOL = {
       filter: { type: "string" },
     },
     required: ["confirmed", "matched", "deleted", "filter"],
+  },
+};
+
+const BARK_NOTIFY_TOOL = {
+  name: "bark_notify",
+  title: "Send Bark Notification",
+  description: "Send a push notification via Bark service.",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      title: {
+        type: "string",
+        description: "Notification title.",
+      },
+      body: {
+        type: "string",
+        description: "Notification body/message content.",
+      },
+    },
+    required: ["title", "body"],
+  },
+  outputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      success: { type: "boolean" },
+      message: { type: "string" },
+    },
+    required: ["success", "message"],
   },
 };
 
@@ -324,6 +354,71 @@ async function callDeleteEventsTool(
   }
 }
 
+async function callBarkNotifyTool(args: Record<string, unknown>) {
+  const barkKey = process.env.BARK_KEY;
+  
+  if (!barkKey) {
+    return {
+      content: [{ type: "text", text: "Bark notification failed: BARK_KEY environment variable is not set." }],
+      structuredContent: { success: false, message: "BARK_KEY not configured" },
+      isError: true,
+    };
+  }
+
+  const title = args.title;
+  const body = args.body;
+
+  if (typeof title !== "string" || !title.trim()) {
+    return {
+      content: [{ type: "text", text: "Bark notification failed: title is required and must be a non-empty string." }],
+      structuredContent: { success: false, message: "Invalid title" },
+      isError: true,
+    };
+  }
+
+  if (typeof body !== "string" || !body.trim()) {
+    return {
+      content: [{ type: "text", text: "Bark notification failed: body is required and must be a non-empty string." }],
+      structuredContent: { success: false, message: "Invalid body" },
+      isError: true,
+    };
+  }
+
+  try {
+    const encodedTitle = encodeURIComponent(title.trim());
+    const encodedBody = encodeURIComponent(body.trim());
+    const url = `https://api.day.app/${barkKey}/${encodedTitle}/${encodedBody}`;
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { "User-Agent": "device-event-logger/1.0" },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Bark API error: ${response.status} ${errorText}`);
+      return {
+        content: [{ type: "text", text: `Bark notification failed: HTTP ${response.status}` }],
+        structuredContent: { success: false, message: `HTTP ${response.status}` },
+        isError: true,
+      };
+    }
+
+    return {
+      content: [{ type: "text", text: `Bark notification sent successfully. Title: "${title}", Body: "${body}"` }],
+      structuredContent: { success: true, message: "Notification sent" },
+      isError: false,
+    };
+  } catch (error) {
+    console.error("MCP bark_notify failed:", error);
+    return {
+      content: [{ type: "text", text: `Bark notification failed: ${error instanceof Error ? error.message : "Unknown error"}` }],
+      structuredContent: { success: false, message: error instanceof Error ? error.message : "Unknown error" },
+      isError: true,
+    };
+  }
+}
+
 async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offsetMinutes: number) {
   const id = (message.id ?? null) as JsonRpcId;
   const method = typeof message.method === "string" ? message.method : "";
@@ -347,7 +442,7 @@ async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offs
         serverInfo: MCP_SERVER_INFO,
         instructions:
           "This server exposes user device event records. Use list_event_types to discover available event types, then use query_events to read records by time range, type, and value. " +
-          "delete_events removes records permanently: always run it once without confirm to preview the match count, show that count to the user, and only re-run it with confirm=true after they agree.",
+          "delete_events removes records permanently: always run it once without confirm to preview the match count, show that count to the user, and only re-run it with confirm=true after they a[...]
       });
     }
     case "notifications/initialized":
@@ -356,7 +451,7 @@ async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offs
       return jsonRpcResult(id, {});
     case "tools/list":
       return jsonRpcResult(id, {
-        tools: [QUERY_EVENTS_TOOL, LIST_EVENT_TYPES_TOOL, DELETE_EVENTS_TOOL],
+        tools: [QUERY_EVENTS_TOOL, LIST_EVENT_TYPES_TOOL, DELETE_EVENTS_TOOL, BARK_NOTIFY_TOOL],
       });
     case "tools/call": {
       const name = typeof params.name === "string" ? params.name : "";
@@ -368,6 +463,9 @@ async function handleMcpRequest(message: JsonRpcMessage, sql: postgres.Sql, offs
       }
       if (name === DELETE_EVENTS_TOOL.name) {
         return jsonRpcResult(id, await callDeleteEventsTool(args, sql, offsetMinutes));
+      }
+      if (name === BARK_NOTIFY_TOOL.name) {
+        return jsonRpcResult(id, await callBarkNotifyTool(args));
       }
       if (name !== QUERY_EVENTS_TOOL.name) {
         return jsonRpcError(id, -32601, `Unknown tool: ${name || "(empty)"}`);
