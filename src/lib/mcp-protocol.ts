@@ -124,8 +124,9 @@ function jsonRpcError(id: JsonRpcId, code: number, message: string): JsonRpcResp
 async function callQueryEventsTool(args: Record<string, unknown>, sql: postgres.Sql, offsetMinutes: number): Promise<ToolCallResult> {
   try {
     const query = parseEventQueryFromToolArgs(args, offsetMinutes);
-    const events = await withRetry(() => queryEvents(sql, query));
-    const total = await withRetry(() => countMatchingEvents(sql, query));
+    const events = await withRetry(() => queryEvents(query, sql, offsetMinutes));
+    const total = await withRetry(() => countMatchingEvents(query, sql)
+);
     const text = buildEventSummaryText(events, total, query);
     return {
       content: [{ type: "text", text }],
