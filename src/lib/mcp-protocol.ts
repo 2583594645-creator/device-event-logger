@@ -1,3 +1,4 @@
+import { sendBarkNotification } from "./bark.ts";
 import type { Context } from "hono";
 import type postgres from "postgres";
 import type { Env, Vars, JsonRpcId, JsonRpcMessage } from "../types.ts";
@@ -101,6 +102,27 @@ const QUERY_EVENTS_TOOL = {
     required: ["total", "events"],
   },
 };
+const BARK_NOTIFY_TOOL = {
+  name: "send_bark_notification",
+  title: "Send Bark Notification",
+  description: "Push a notification to the user's iPhone via Bark app.",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      title: {
+        type: "string",
+        description: "Notification title.",
+      },
+      body: {
+        type: "string",
+        description: "Notification body text.",
+      },
+    },
+    required: ["title", "body"],
+  },
+};
+
 
 const LIST_EVENT_TYPES_TOOL = {
   name: "list_event_types",
