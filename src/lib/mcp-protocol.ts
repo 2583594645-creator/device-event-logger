@@ -1,4 +1,4 @@
-import { sendBarkNotification } from "./bark.ts";
+ import { sendBarkNotification } from "./bark.ts";
 import type { Context } from "hono";
 import type postgres from "postgres";
 import type { Env, Vars, JsonRpcId, JsonRpcMessage } from "../types.ts";
