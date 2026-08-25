@@ -1,5 +1,4 @@
- import { sendBarkNotification } from "./bark.ts";
-import type { Context } from "hono";
+import { Context } from "hono";
 import type postgres from "postgres";
 import type { Env, Vars, JsonRpcId, JsonRpcMessage } from "../types.ts";
 import {
@@ -80,6 +79,23 @@ const DELETE_EVENTS_TOOL = {
       confirm: { type: "boolean", description: "Must be true to actually delete. Omit to preview only." },
     },
     required: [],
+  },
+};
+
+// 🟢 新增：记录 App 使用 + 自动判断是否推送 Bark
+const LOG_APP_USAGE_TOOL = {
+  name: "log_app_usage",
+  title: "Log App Usage",
+  description: "Record an app usage event from iPhone, and automatically send Bark notification if daily usage exceeds threshold.",
+  inputSchema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      appName: { type: "string", description: "App name (e.g., 抖音, 微信)" },
+      duration: { type: "number", description: "Usage duration in seconds." },
+      threshold: { type: "number", description: "Daily threshold in seconds. Default 1800 (30 min)." },
+    },
+    required: ["appName"],
   },
 };
 
@@ -181,6 +197,48 @@ async function callDeleteEventsTool(args: Record<string, unknown>, sql: postgres
   }
 }
 
+// 🟢 新增：记录使用 + 自动判断推送
+async function callLogAppUsageTool(args: Record<string, unknown>, sql: postgres.Sql): Promise<ToolCallResult> {
+  const appName = args.appName;
+  if (typeof appName !== "string" || !appName.trim()) {
+    return { content: [{ type: "text", text: "appName required." }], isError: true };
+  }
+  
+  const duration = typeof args.duration === "number" ? args.duration : 0;
+  const threshold = typeof args.threshold === "number" ? args.threshold : 1800;
+  
+  try {
+    await withRetry(async () => {
+      await sql`INSERT INTO events (type, value, ts) VALUES (${'app.usage.' + appName}, ${duration.toString()}, NOW())`;
+    });
+    
+    const today = await withRetry(async () => {
+      return await sql<{ total: number }[]>`SELECT COALESCE(SUM(value::numeric), 0) as total 
+        FROM events 
+        WHERE type = ${'app.usage.' + appName} 
+        AND ts >= DATE_TRUNC('day', NOW())`;
+    });
+    
+    const totalSeconds = Number(today[0]?.total ?? 0);
+    const totalMinutes = Math.round(totalSeconds / 60);
+    
+    const barkKey = Deno.env.get("BARK_KEY");
+    if (totalSeconds > threshold && barkKey) {
+      const title = `📱 ${appName} 使用提醒`;
+      const body = `今天已使用 ${totalMinutes} 分钟，超过 ${Math.round(threshold/60)} 分钟阈值`;
+      await sendBarkNotification(barkKey, title, body);
+    }
+    
+    return {
+      content: [{ type: "text", text: `记录成功。${appName} 今日累计 ${totalMinutes} 分钟` }],
+      structuredContent: { success: true, app: appName, totalMinutes },
+      isError: false,
+    };
+  } catch (error) {
+    return { content: [{ type: "text", text: "Database error: " + String(error) }], isError: true };
+  }
+}
+
 async function callBarkNotifyTool(args: Record<string, unknown>): Promise<ToolCallResult> {
   const barkKey = Deno.env.get("BARK_KEY");
   if (!barkKey) {
@@ -202,6 +260,11 @@ async function callBarkNotifyTool(args: Record<string, unknown>): Promise<ToolCa
   }
 }
 
+async function sendBarkNotification(barkKey: string, title: string, body: string) {
+  const url = `https://api.day.app/${barkKey}/${encodeURIComponent(title)}/${encodeURIComponent(body)}`;
+  await fetch(url);
+}
+
 async function handleMcpRequest(message: JsonRpcRequest, sql: postgres.Sql, offsetMinutes: number, protocolVersion: string): Promise<JsonRpcResponse | null> {
   const id = (message.id ?? null) as JsonRpcId;
   const method = typeof message.method === "string" ? message.method : "";
@@ -220,13 +283,14 @@ async function handleMcpRequest(message: JsonRpcRequest, sql: postgres.Sql, offs
     }
     case "notifications/initialized": return null;
     case "ping": return jsonRpcResult(id, {});
-    case "tools/list": return jsonRpcResult(id, { tools: [QUERY_EVENTS_TOOL, LIST_EVENT_TYPES_TOOL, DELETE_EVENTS_TOOL, BARK_NOTIFY_TOOL] });
+    case "tools/list": return jsonRpcResult(id, { tools: [QUERY_EVENTS_TOOL, LIST_EVENT_TYPES_TOOL, DELETE_EVENTS_TOOL, LOG_APP_USAGE_TOOL, BARK_NOTIFY_TOOL] });
     case "tools/call": {
       const name = typeof params.name === "string" ? params.name : "";
       const args = (params.arguments && typeof params.arguments === "object") ? params.arguments as Record<string, unknown> : {};
       if (name === LIST_EVENT_TYPES_TOOL.name) return jsonRpcResult(id, await callListEventTypesTool(args, sql));
       if (name === DELETE_EVENTS_TOOL.name) return jsonRpcResult(id, await callDeleteEventsTool(args, sql, offsetMinutes));
       if (name === BARK_NOTIFY_TOOL.name) return jsonRpcResult(id, await callBarkNotifyTool(args));
+      if (name === LOG_APP_USAGE_TOOL.name) return jsonRpcResult(id, await callLogAppUsageTool(args, sql));
       if (name !== QUERY_EVENTS_TOOL.name) return jsonRpcError(id, -32601, "Unknown tool: " + (name || "(empty)"));
       return jsonRpcResult(id, await callQueryEventsTool(args, sql, offsetMinutes));
     }
