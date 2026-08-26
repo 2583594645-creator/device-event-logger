@@ -23,11 +23,11 @@ async function checkAndAlert() {
     `;
     await sql.end();
     const found = rows.find((r: { type: string; value: string }) =>
-      WATCH_APPS.some((app) =>
-        r.value?.toLowerCase().includes("deepseek") ||
-        r.type?.toLowerCase().includes("deepseek")
-      )
-    );
+  WATCH_APPS.some((app) =>
+    r.value?.includes(app) || r.type?.includes(app)
+  )
+);
+
     const now = Date.now();
     if (found && now - lastAlertTime > 60 * 1000) {
   lastAlertTime = now;
