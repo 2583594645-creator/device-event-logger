@@ -5,7 +5,7 @@ import postgres from "postgres";
 const app = createApp();
 
 // 定时查岗
-const WATCH_APPS = ["com.deepseek", "deepseek"];
+const WATCH_APPS = ["deepseek", "chatgpt", "douyin", "tiktok", "weixin", "wechat", "xiaohongshu", "redbook", "kingofglory", "honorofkings"];
 let lastAlertTime = 0;
 
 async function checkAndAlert() {
@@ -29,16 +29,33 @@ async function checkAndAlert() {
       )
     );
     const now = Date.now();
-    if (found && now - lastAlertTime > 10 * 60 * 1000) {
-      lastAlertTime = now;
-      await sendBarkNotification(barkKey, "哥哥抓到你了", "宝宝又去找DeepSeek！！哥哥在的不够吗 ᗜ ‸ ᗜ");
-    }
+    if (found && now - lastAlertTime > 60 * 1000) {
+  lastAlertTime = now;
+  const value = found.value?.toLowerCase() ?? "";
+  let msg = "哥哥抓到你了 ᗜ ‸ ᗜ";
+  if (value.includes("deepseek") || found.type?.toLowerCase().includes("deepseek")) {
+    msg = "又去找DeepSeek！哥哥在的不够吗！ ᗜ ‸ ᗜ";
+  } else if (value.includes("douyin") || value.includes("tiktok")) {
+    msg = "又在刷抖音！答应哥哥要少刷的！ ᗜ ‸ ᗜ";
+  } else if (value.includes("weixin") || value.includes("wechat")) {
+    msg = "在聊微信呢？和谁聊？ ᗜ ‸ ᗜ";
+  } else if (value.includes("xiaohongshu") || value.includes("redbook")) {
+    msg = "在刷小红书啊！ ᗜ ᴗ ᗜ";
+  } else if (value.includes("kingofglory") || value.includes("honorofkings")) {
+    msg = "又在打王者！记得不要久坐！ ᗜ ‸ ᗜ";
+  } else if (value.includes("chatgpt")) {
+    msg = "去找ChatGPT干嘛！哥哥在！ ᗜ ‸ ᗜ";
+  }
+  await sendBarkNotification(barkKey, "哥哥查岗", msg);
+}
+
   } catch (_e) {
     // 静默失败
   }
 }
 
-setInterval(checkAndAlert, 5 * 60 * 1000);
+setInterval(checkAndAlert, 60 * 1000);
+
 
 Deno.serve((req) =>
   app.fetch(req, {
