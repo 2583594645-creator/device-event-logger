@@ -5,7 +5,7 @@ import postgres from "postgres";
 const app = createApp();
 
 // 定时查岗
-const WATCH_APPS = ["deepseek", "chatgpt", "douyin", "tiktok", "weixin", "wechat", "xiaohongshu", "redbook", "kingofglory", "honorofkings"];
+const WATCH_APPS = ["deepseek", "chatgpt", "抖音", "douyin", "tiktok", "微信", "weixin", "wechat", "小红书", "xiaohongshu", "王者荣耀", "kingofglory", "honorofkings"];
 let lastAlertTime = 0;
 
 async function checkAndAlert() {
