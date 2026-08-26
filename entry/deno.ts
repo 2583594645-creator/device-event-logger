@@ -29,7 +29,7 @@ async function checkAndAlert() {
 );
 
     const now = Date.now();
-    if (found && now - lastAlertTime > 60 * 1000) {
+   if (found && now - lastAlertTime > 10 * 60 * 1000) {
   lastAlertTime = now;
   const value = found.value?.toLowerCase() ?? "";
   let msg = "哥哥抓到你了 ᗜ ‸ ᗜ";
